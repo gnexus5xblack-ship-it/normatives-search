@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import re
-from rtfparse.parser import Rtf_Parser
+import textract
 
 # Настройка страницы
 st.set_page_config(page_title="Смысловой поиск по нормативам", layout="wide")
@@ -21,25 +21,11 @@ def load_model():
 
 model = load_model()
 
-# Функция для извлечения текста из RTF
+# Функция для извлечения текста из RTF через textract
 def extract_text_from_rtf(rtf_path):
     try:
-        # Парсим RTF-файл
-        parser = Rtf_Parser(rtf_path=Path(rtf_path))
-        parsed = parser.parse_file()
-        
-        # Собираем весь текст из структуры документа
-        text_parts = []
-        for element in parsed:
-            # Проверяем, есть ли текстовое содержимое
-            if hasattr(element, 'value') and isinstance(element.value, str):
-                text_parts.append(element.value)
-            # Некоторые версии хранят текст в атрибуте 'text'
-            elif hasattr(element, 'text') and isinstance(element.text, str):
-                text_parts.append(element.text)
-        
-        # Объединяем все части
-        text = ' '.join(text_parts)
+        # textract умеет читать RTF напрямую
+        text = textract.process(str(rtf_path)).decode('utf-8', errors='ignore')
         
         # Удаляем лишние пробелы и переносы строк
         text = re.sub(r'\s+', ' ', text).strip()
@@ -130,7 +116,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.caption("💡 Чтобы добавить новый норматив, загрузите RTF-файл в папку 'docs' на GitHub")
-    st.caption("⚙️ Используется библиотека rtfparse для чтения RTF")
+    st.caption("⚙️ Используется библиотека textract для чтения RTF")
 
 # Поле для поискового запроса
 st.markdown("### ✏️ Введите ваш запрос")
