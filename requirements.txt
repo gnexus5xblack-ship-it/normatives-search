@@ -3,4 +3,4 @@ sentence-transformers
 scikit-learn
 pandas
 numpy
-pyth
+rtfparse

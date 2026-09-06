@@ -6,48 +6,55 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import re
-import tempfile
-from pyth.plugins.rtf15.reader import Rtf15Reader
-from pyth.plugins.plaintext.writer import PlaintextWriter
+from rtfparse.parser import Rtf_Parser
 
 # Настройка страницы
 st.set_page_config(page_title="Смысловой поиск по нормативам", layout="wide")
 st.title("🧠 Смысловой поиск по нормативной документации")
+st.markdown("**Ищет по смыслу, а не по точным словам**")
 st.markdown("---")
 
-# Загружаем модель
+# Загружаем модель (кешируется для быстрой работы)
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 model = load_model()
 
-# Функция для извлечения текста из RTF с помощью pyth
+# Функция для извлечения текста из RTF
 def extract_text_from_rtf(rtf_path):
     try:
-        # Читаем RTF-файл
-        with open(rtf_path, 'rb') as f:
-            doc = Rtf15Reader.read(f)
+        # Парсим RTF-файл
+        parser = Rtf_Parser(rtf_path=Path(rtf_path))
+        parsed = parser.parse_file()
         
-        # Извлекаем текст через PlaintextWriter
-        text = PlaintextWriter.write(doc).getvalue()
+        # Собираем весь текст из структуры документа
+        text_parts = []
+        for element in parsed:
+            # Проверяем, есть ли текстовое содержимое
+            if hasattr(element, 'value') and isinstance(element.value, str):
+                text_parts.append(element.value)
+            # Некоторые версии хранят текст в атрибуте 'text'
+            elif hasattr(element, 'text') and isinstance(element.text, str):
+                text_parts.append(element.text)
         
-        # Декодируем и чистим
-        if isinstance(text, bytes):
-            text = text.decode('utf-8', errors='ignore')
-        elif isinstance(text, str):
-            text = text
+        # Объединяем все части
+        text = ' '.join(text_parts)
         
-        # Удаляем лишние пробелы и переносы
+        # Удаляем лишние пробелы и переносы строк
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     except Exception as e:
-        st.error(f"Ошибка при чтении {rtf_path.name}: {e}")
+        st.error(f"⚠️ Ошибка при чтении {rtf_path.name}: {e}")
         return ""
 
-# Функция для разбивки текста на чанки
+# Функция для разбивки текста на фрагменты (чанки)
 def split_into_chunks(text, chunk_size=500, overlap=100):
+    """Разбивает текст на перекрывающиеся фрагменты для лучшего поиска"""
     words = text.split()
+    if not words:
+        return []
+    
     chunks = []
     for i in range(0, len(words), chunk_size - overlap):
         chunk = ' '.join(words[i:i + chunk_size])
@@ -55,69 +62,117 @@ def split_into_chunks(text, chunk_size=500, overlap=100):
             chunks.append(chunk)
     return chunks
 
-# Функция для поиска
+# Функция для семантического поиска
 def search_semantic(query, chunks, chunk_metadata, model, top_k=10):
+    if not chunks:
+        return []
+    
+    # Создаем эмбеддинг для запроса
     query_embedding = model.encode([query])
+    
+    # Создаем эмбеддинги для всех фрагментов
     chunk_embeddings = model.encode(chunks)
+    
+    # Вычисляем косинусное сходство
     similarities = cosine_similarity(query_embedding, chunk_embeddings)[0]
+    
+    # Получаем индексы топ-k наиболее похожих фрагментов
     top_indices = np.argsort(similarities)[::-1][:top_k]
-    results = [(chunks[i], chunk_metadata[i], similarities[i]) for i in top_indices if similarities[i] > 0.3]
+    
+    # Формируем результаты с порогом схожести 0.3 (30%)
+    results = []
+    for i in top_indices:
+        if similarities[i] > 0.3:
+            results.append((chunks[i], chunk_metadata[i], similarities[i]))
+    
     return results
 
-# Показываем список файлов в папке docs
+# --- Интерфейс приложения ---
+
+# Боковая панель с информацией
 st.sidebar.header("📚 Библиотека нормативов")
 
 # Путь к папке с документами (в репозитории)
 docs_folder = Path("./docs")
 
+# Проверяем наличие папки docs
 if not docs_folder.exists():
-    st.error("❌ Папка 'docs' не найдена! Создайте её в репозитории и добавьте RTF-файлы.")
-    st.info("📖 Инструкция: на GitHub создайте папку 'docs' и загрузите туда ваши RTF-файлы")
+    st.error("❌ Папка 'docs' не найдена!")
+    st.info("📖 Создайте папку 'docs' в репозитории и добавьте RTF-файлы с нормативами.")
     st.stop()
 
 # Получаем список RTF-файлов
 rtf_files = list(docs_folder.glob("*.rtf"))
 
 if not rtf_files:
-    st.warning("📁 В папке 'docs' нет RTF-файлов. Добавьте их через GitHub.")
-    st.info("1. Зайдите в ваш репозиторий на GitHub")
-    st.info("2. Нажмите 'Add file' → 'Upload files'")
-    st.info("3. Выберите папку 'docs' и загрузите RTF-файлы")
-    st.info("4. После загрузки обновите эту страницу")
+    st.warning("📁 В папке 'docs' нет RTF-файлов")
+    st.info("📤 Загрузите RTF-файлы через GitHub в папку 'docs' и обновите страницу.")
+    
+    # Инструкция
+    with st.expander("📖 Как добавить нормативы"):
+        st.markdown("""
+        1. Зайдите на **GitHub** в ваш репозиторий
+        2. Нажмите **'Add file' → 'Upload files'**
+        3. Выберите папку **'docs'**
+        4. Перетащите RTF-файлы с нормативами
+        5. Нажмите **'Commit changes'**
+        6. Обновите эту страницу
+        """)
     st.stop()
 
-# Отображаем список файлов
+# Отображаем список загруженных файлов
 with st.sidebar:
-    st.write(f"📄 Всего нормативов: {len(rtf_files)}")
+    st.write(f"📄 Всего нормативов: **{len(rtf_files)}**")
+    st.markdown("**Файлы:**")
     for f in rtf_files:
-        st.write(f"   - {f.name}")
+        file_size = f.stat().st_size // 1024  # размер в КБ
+        st.write(f"   - {f.name} ({file_size} КБ)")
     
     st.markdown("---")
     st.caption("💡 Чтобы добавить новый норматив, загрузите RTF-файл в папку 'docs' на GitHub")
-    st.caption("⚙️ Используется библиотека pyth для чтения RTF")
+    st.caption("⚙️ Используется библиотека rtfparse для чтения RTF")
 
-# Поисковый запрос
-query = st.text_input("✏️ Введите запрос:", placeholder="например: сечение проводников заземления")
+# Поле для поискового запроса
+st.markdown("### ✏️ Введите ваш запрос")
+query = st.text_input(
+    "Поисковый запрос:",
+    placeholder="например: сечение проводников заземления",
+    label_visibility="collapsed"
+)
 
 # Кнопка поиска
-if st.button("🔎 Искать по смыслу", type="primary") and query:
+col1, col2, col3 = st.columns([1, 1, 4])
+with col1:
+    search_button = st.button("🔎 Искать по смыслу", type="primary", use_container_width=True)
+
+# Обработка поиска
+if search_button and query:
     if len(query) < 3:
-        st.warning("Введите минимум 3 символа")
+        st.warning("⚠️ Введите минимум 3 символа для поиска")
         st.stop()
     
     with st.spinner(f"🧠 Обрабатываю {len(rtf_files)} нормативов..."):
         all_chunks = []
         all_metadata = []
+        failed_files = []
         
+        # Прогресс-бар
         progress_bar = st.progress(0)
+        
+        # Обрабатываем каждый файл
         for idx, rtf_file in enumerate(rtf_files):
             progress_bar.progress((idx + 1) / len(rtf_files))
             
+            # Извлекаем текст
             text = extract_text_from_rtf(rtf_file)
             if not text:
+                failed_files.append(rtf_file.name)
                 continue
             
+            # Разбиваем на чанки
             chunks = split_into_chunks(text)
+            
+            # Сохраняем с метаданными
             for chunk in chunks:
                 all_chunks.append(chunk)
                 all_metadata.append({
@@ -127,39 +182,79 @@ if st.button("🔎 Искать по смыслу", type="primary") and query:
         
         progress_bar.empty()
         
+        # Если не удалось извлечь текст
+        if failed_files:
+            st.warning(f"⚠️ Не удалось прочитать {len(failed_files)} файлов: {', '.join(failed_files[:3])}")
+        
+        # Если нет текста для поиска
         if not all_chunks:
-            st.warning("Не удалось извлечь текст из файлов. Проверьте формат RTF.")
+            st.error("❌ Не удалось извлечь текст из файлов. Проверьте формат RTF.")
+            st.info("💡 Совет: попробуйте сохранить файлы как 'RTF' через Microsoft Word или WordPad")
             st.stop()
         
+        # Выполняем семантический поиск
         results = search_semantic(query, all_chunks, all_metadata, model)
         
+        # Вывод результатов
         if results:
-            st.success(f"✅ Найдено {len(results)} релевантных фрагментов")
+            st.success(f"✅ Найдено **{len(results)}** релевантных фрагментов")
             st.markdown("---")
             
+            # Показываем результаты
             for i, (chunk, meta, score) in enumerate(results, 1):
                 with st.container():
                     col1, col2 = st.columns([4, 1])
                     with col1:
                         st.markdown(f"**Результат {i}**")
-                        st.write(chunk[:400] + "..." if len(chunk) > 400 else chunk)
+                        # Показываем первые 500 символов
+                        display_text = chunk[:500] + "..." if len(chunk) > 500 else chunk
+                        st.write(display_text)
                     with col2:
-                        st.metric("Сходство", f"{score:.2%}")
+                        # Показываем процент сходства
+                        score_percent = f"{score * 100:.1f}%"
+                        st.metric("Сходство", score_percent)
                     
-                    st.caption(f"📌 Источник: **{meta['норматив']}** (файл: {meta['файл']})")
+                    # Информация об источнике
+                    st.caption(f"📌 **Источник:** {meta['норматив']} (файл: {meta['файл']})")
                     st.divider()
+            
+            # Кнопка для скачивания результатов в CSV
+            results_df = pd.DataFrame([
+                {
+                    'текст': r[0][:200] + '...' if len(r[0]) > 200 else r[0],
+                    'норматив': r[1]['норматив'],
+                    'файл': r[1]['файл'],
+                    'сходство': f"{r[2]*100:.1f}%"
+                }
+                for r in results
+            ])
+            
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Скачать результаты в CSV",
+                data=csv,
+                file_name=f"результаты_поиска_{query[:20].replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
         else:
-            st.warning(f"😕 Ничего не найдено по запросу '{query}'")
+            st.warning(f"😕 Ничего не найдено по запросу **'{query}'**")
+            st.info("💡 Совет: попробуйте использовать более общие термины (например, 'заземление', 'сечение', 'проводник')")
 
-# Инструкция
+elif search_button and not query:
+    st.warning("⚠️ Введите поисковый запрос")
+
+# Информация в боковой панели
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### 📖 Как пополнить библиотеку")
+    st.markdown("### 📖 Как это работает")
     st.markdown("""
-    1. Зайдите на **GitHub** в ваш репозиторий
-    2. Нажмите **'Add file' → 'Upload files'**
-    3. Выберите папку **'docs'** на своем компьютере
-    4. Перетащите новые RTF-файлы
-    5. Нажмите **'Commit changes'**
-    6. Обновите эту страницу — новый норматив появится в поиске!
+    1. Загрузите RTF-файлы с нормативами в папку `docs`
+    2. Введите запрос на русском языке
+    3. Приложение находит фрагменты по **смыслу**, а не по словам
+    4. Результаты показывают процент сходства с запросом
+    5. Можно скачать результаты в CSV
     """)
+    
+    st.markdown("---")
+    st.caption("🔒 Данные хранятся только в вашем репозитории GitHub")
+    st.caption("🧠 Модель: all-MiniLM-L6-v2 (бесплатно, локально)")
