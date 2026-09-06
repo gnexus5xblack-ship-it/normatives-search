@@ -10,57 +10,43 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# --- Настройка страницы ---
+# --- Настройка ---
 st.set_page_config(page_title="Точный поиск по нормативам", layout="wide")
-st.title("🎯 Максимально точный поиск по нормативам")
-st.markdown("**Гибридный поиск: смысл + ключевые слова + синонимы + приоритет нормативов**")
+st.title("🎯 Точный поиск по нормативам")
+st.markdown("**Гибридный поиск: смысл + ключевые слова + фильтрация шума**")
 st.markdown("---")
 
-# --- Словарь синонимов для расширения запроса ---
+# --- Словарь синонимов ---
 SYNONYMS = {
-    'автомат': ['автоматический выключатель', 'защитный автомат', 'АВ', 'автоматический аппарат'],
-    'заземление': ['защитное заземление', 'заземляющее устройство', 'контур заземления', 'заземлитель'],
-    'зануление': ['нулевой провод', 'PEN', 'защитный нулевой проводник'],
-    'УЗО': ['устройство защитного отключения', 'дифференциальный автомат', 'дифавтомат'],
-    'сечение': ['площадь поперечного сечения', 'жила', 'проводник', 'кабель'],
-    'проводник': ['жила', 'кабель', 'провод', 'токоведущая часть'],
-    'срабатывание': ['отключение', 'выключение', 'защита', 'реакция'],
-    'время': ['длительность', 'период', 'интервал', 'секунды'],
-    'сопротивление': ['омическое сопротивление', 'импеданс', 'R'],
-    'ток': ['сила тока', 'амперы', 'I', 'токовая нагрузка'],
-    'напряжение': ['вольты', 'U', 'потенциал'],
-    'молниезащита': ['защита от молнии', 'громоотвод', 'молниеприемник', 'токоотвод'],
-    'ПУЭ': ['правила устройства электроустановок', 'пуэ', 'Правила устройства'],
-    'ГОСТ': ['государственный стандарт', 'гост'],
-    'СО': ['свод правил', 'СП', 'инструкция'],
+    'автомат': ['автоматический выключатель', 'АВ', 'защитный аппарат'],
+    'заземление': ['заземляющее устройство', 'заземлитель', 'контур заземления'],
+    'сечение': ['площадь поперечного сечения', 'жила', 'проводник'],
+    'срабатывание': ['отключение', 'выключение', 'защита'],
+    'сопротивление': ['омическое сопротивление', 'импеданс'],
+    'ток': ['сила тока', 'амперы', 'токовая нагрузка'],
+    'зануление': ['нулевой провод', 'PEN'],
+    'УЗО': ['устройство защитного отключения'],
 }
 
-# --- Приоритет нормативов (от更高 к низшему) ---
-PRIORITY_ORDER = {
-    'ПУЭ': 10,
-    'ГОСТ': 9,
-    'СО': 8,
-    'СП': 8,
-    'Инструкция': 7,
-    'Правила': 6,
-}
-
-# --- Стоп-слова (не влияют на поиск) ---
+# --- Стоп-слова (полный список) ---
 STOP_WORDS = set([
     'и', 'в', 'на', 'с', 'по', 'к', 'у', 'о', 'от', 'до', 'из', 'за', 'через',
     'при', 'для', 'без', 'под', 'над', 'об', 'про', 'же', 'бы', 'да', 'нет',
     'так', 'как', 'что', 'это', 'все', 'всё', 'или', 'если', 'то', 'но', 'а',
-    'его', 'её', 'ее', 'их', 'еще', 'уже', 'еще', 'ведь', 'вот', 'лишь',
+    'его', 'её', 'ее', 'их', 'еще', 'уже', 'ведь', 'вот', 'лишь', 'очень',
+    'можно', 'нужно', 'должен', 'должна', 'должны', 'быть',
+    'более', 'менее', 'также', 'кроме', 'который', 'которая', 'которое',
+    'этом', 'этом', 'этим', 'этой', 'этого', 'этих', 'этим',
 ])
 
-# --- Загрузка модели (специально для техтекстов) ---
+# --- Загрузка модели ---
 @st.cache_resource
 def load_model():
-    return SentenceTransformer('sentence-transformers/allenai-specter')
+    return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 model = load_model()
 
-# --- Кэширование эмбеддингов ---
+# --- Кэш эмбеддингов ---
 CACHE_DIR = Path("./cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -77,23 +63,17 @@ def get_embedding(text):
         pickle.dump(emb, f)
     return emb
 
-# --- Расширение запроса синонимами ---
+# --- Расширение запроса ---
 def expand_query(query):
-    words = query.lower().split()
+    words = re.findall(r'[а-яa-z0-9]{3,}', query.lower())
     expanded = [query]
     
-    # Заменяем слова на синонимы
+    # Синонимы
     for word in words:
-        word_clean = re.sub(r'[^а-яa-z]', '', word)
-        if word_clean in SYNONYMS:
-            for syn in SYNONYMS[word_clean]:
+        if word in SYNONYMS:
+            for syn in SYNONYMS[word]:
                 if syn not in query.lower():
                     expanded.append(syn)
-    
-    # Если есть номер пункта (п. 1.7.126) — сохраняем как есть
-    point_match = re.search(r'[пп]\.\s*[\d\.]+', query)
-    if point_match:
-        expanded.append(point_match.group())
     
     return ' '.join(expanded)
 
@@ -120,37 +100,60 @@ def extract_text_from_txt(txt_path):
     except Exception:
         return ""
 
-# --- Умная разбивка на фрагменты ---
-def split_by_sentences(text, max_len=300, overlap=50):
+# --- Разбивка на короткие точные фрагменты ---
+def split_by_sentences(text, max_len=200, overlap=30):
+    """Разбивает на маленькие фрагменты для точности"""
+    # Разбиваем по предложениям
     sentences = re.split(r'(?<=[.!?])\s+', text)
+    
     chunks = []
-    current_chunk = []
+    current = []
     current_len = 0
     
     for sent in sentences:
         sent_len = len(sent.split())
-        if current_len + sent_len > max_len and current_chunk:
-            chunks.append(' '.join(current_chunk))
-            overlap_words = ' '.join(current_chunk).split()[-overlap:] if overlap > 0 else []
-            current_chunk = overlap_words + [sent]
+        if current_len + sent_len > max_len and current:
+            chunks.append(' '.join(current))
+            # Перекрытие только 30 слов
+            overlap_words = ' '.join(current).split()[-overlap:] if overlap > 0 else []
+            current = overlap_words + [sent]
             current_len = len(overlap_words) + sent_len
         else:
-            current_chunk.append(sent)
+            current.append(sent)
             current_len += sent_len
     
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
+    if current:
+        chunks.append(' '.join(current))
+    
     return chunks
 
-# --- Определение приоритета норматива ---
-def get_priority(filename):
-    for key, value in PRIORITY_ORDER.items():
-        if key in filename:
-            return value
-    return 5
+# --- Фильтрация фрагментов (отсекаем мусор) ---
+def filter_chunks(chunks, metadata):
+    """Удаляет слишком короткие, слишком длинные, служебные фрагменты"""
+    filtered = []
+    for chunk, meta in zip(chunks, metadata):
+        words = chunk.split()
+        word_count = len(words)
+        
+        # Минимум 10 слов, максимум 250
+        if word_count < 10 or word_count > 250:
+            continue
+        
+        # Удаляем фрагменты с подозрительными маркерами
+        if 'таблица' in chunk.lower() and len(words) < 15:
+            continue
+        
+        # Удаляем фрагменты с большим количеством цифр (оглавления)
+        digit_ratio = len(re.findall(r'\d', chunk)) / len(chunk)
+        if digit_ratio > 0.2:  # больше 20% цифр
+            continue
+        
+        filtered.append((chunk, meta))
+    
+    return filtered
 
-# --- Гибридный поиск с синонимами и приоритетом ---
-def advanced_search(query, chunks, chunk_metadata, model, top_k=25, min_similarity=0.3):
+# --- Основной поиск (с жёсткой фильтрацией) ---
+def advanced_search(query, chunks, chunk_metadata, model, top_k=15, min_similarity=0.5):
     if not chunks:
         return []
     
@@ -162,48 +165,53 @@ def advanced_search(query, chunks, chunk_metadata, model, top_k=25, min_similari
     chunk_embs = np.array([get_embedding(c)[0] for c in chunks])
     semantic_scores = cosine_similarity(query_emb, chunk_embs)[0]
     
-    # 3. Ключевые слова (TF-IDF)
-    try:
-        vectorizer = TfidfVectorizer(stop_words=list(STOP_WORDS), max_features=150)
-        tfidf_matrix = vectorizer.fit_transform(chunks + [query])
-        keyword_scores = cosine_similarity(tfidf_matrix[-1:], tfidf_matrix[:-1])[0]
-    except:
-        keyword_scores = np.zeros(len(chunks))
+    # 3. Ключевые слова (строгий поиск терминов)
+    # Извлекаем ключевые термины из запроса
+    query_terms = set(re.findall(r'[а-яa-z]{4,}', query.lower()))
+    query_terms = query_terms - STOP_WORDS
     
-    # 4. Нормализация по длине (короткие точные фрагменты в приоритете)
-    length_scores = np.array([1.0 / (1 + len(c.split()) / 100) for c in chunks])
+    keyword_scores = []
+    for chunk in chunks:
+        chunk_words = set(re.findall(r'[а-яa-z]{4,}', chunk.lower()))
+        # Считаем пересечение ключевых терминов
+        overlap = len(query_terms & chunk_words)
+        if query_terms:
+            keyword_scores.append(overlap / len(query_terms))
+        else:
+            keyword_scores.append(0)
+    keyword_scores = np.array(keyword_scores)
     
-    # 5. Приоритет норматива
-    priority_scores = np.array([get_priority(meta['норматив']) / 10.0 for meta in chunk_metadata])
+    # 4. Комбинированный рейтинг (смещение в сторону ключевых слов)
+    combined = 0.4 * semantic_scores + 0.6 * keyword_scores
     
-    # 6. Комбинированный рейтинг
-    combined_scores = (
-        0.45 * semantic_scores +
-        0.25 * keyword_scores +
-        0.15 * length_scores +
-        0.15 * priority_scores
-    )
+    # 5. Фильтр по количеству совпавших терминов
+    min_term_matches = max(1, len(query_terms) // 2)
     
-    # 7. Сортировка
-    top_indices = np.argsort(combined_scores)[::-1][:top_k]
+    # 6. Сортировка и фильтрация
+    top_indices = np.argsort(combined)[::-1]
     
     results = []
     for i in top_indices:
-        if combined_scores[i] >= min_similarity:
-            # Находим ключевые слова, которые совпали
-            chunk_words = set(re.findall(r'[а-яa-z0-9]{3,}', chunks[i].lower()))
-            query_words = set(re.findall(r'[а-яa-z0-9]{3,}', query.lower()))
-            matched_words = chunk_words & query_words
-            
-            results.append({
-                'text': chunks[i],
-                'metadata': chunk_metadata[i],
-                'score': combined_scores[i],
-                'semantic': semantic_scores[i],
-                'keyword': keyword_scores[i],
-                'priority': priority_scores[i],
-                'matched_words': matched_words,
-            })
+        if len(results) >= top_k:
+            break
+        
+        # Проверяем порог сходства
+        if combined[i] < min_similarity:
+            continue
+        
+        # Проверяем, что есть хотя бы один ключевой термин
+        chunk_words = set(re.findall(r'[а-яa-z]{4,}', chunks[i].lower()))
+        if not (query_terms & chunk_words):
+            continue
+        
+        results.append({
+            'text': chunks[i],
+            'metadata': chunk_metadata[i],
+            'score': combined[i],
+            'semantic': semantic_scores[i],
+            'keyword': keyword_scores[i],
+            'matched_terms': query_terms & chunk_words,
+        })
     
     return results
 
@@ -225,27 +233,28 @@ if not txt_files:
 
 with st.sidebar:
     st.write(f"📄 Всего нормативов: **{len(txt_files)}**")
-    for f in txt_files:
+    for f in txt_files[:10]:
         st.write(f"   - {f.name}")
+    if len(txt_files) > 10:
+        st.write(f"   ... и еще {len(txt_files) - 10}")
 
     st.markdown("---")
-    st.caption("🧠 Модель: allenai-specter (технические тексты)")
-    st.caption("🔍 Гибридный поиск: смысл + слова + приоритет")
-    st.caption("🔄 Авторасширение запроса синонимами")
-    st.caption("📊 Приоритет: ПУЭ > ГОСТ > СО > СП > Инструкции")
-    st.caption("🎯 Порог сходства: 30%")
+    st.caption("🎯 Порог сходства: **50%**")
+    st.caption("📏 Фрагменты: **до 200 слов**")
+    st.caption("🔑 Приоритет: **ключевые термины**")
+    st.caption("🚫 Фильтрация: удаляет короткие/длинные/цифровые фрагменты")
 
 # --- Ввод запроса ---
 query = st.text_input(
     "✏️ Введите запрос:",
-    placeholder="например: время срабатывания автоматических выключателей",
+    placeholder="например: сечение заземляющего проводника по ПУЭ",
     label_visibility="collapsed"
 )
 
-# --- Кнопка поиска ---
+# --- Поиск ---
 if st.button("🔎 Искать", type="primary") and query:
-    if len(query) < 3:
-        st.warning("⚠️ Минимум 3 символа")
+    if len(query) < 4:
+        st.warning("⚠️ Введите минимум 4 символа")
         st.stop()
 
     with st.spinner(f"Обрабатываю {len(txt_files)} файлов..."):
@@ -260,8 +269,8 @@ if st.button("🔎 Искать", type="primary") and query:
             if not text:
                 continue
 
-            chunks = split_by_sentences(text, max_len=300, overlap=50)
-
+            chunks = split_by_sentences(text, max_len=200, overlap=30)
+            
             for chunk in chunks:
                 all_chunks.append(chunk)
                 all_metadata.append({
@@ -275,77 +284,50 @@ if st.button("🔎 Искать", type="primary") and query:
             st.error("❌ Не удалось извлечь текст")
             st.stop()
 
-        results = advanced_search(query, all_chunks, all_metadata, model)
+        # Фильтруем фрагменты
+        filtered = filter_chunks(all_chunks, all_metadata)
+        if filtered:
+            all_chunks, all_metadata = zip(*filtered)
+            all_chunks = list(all_chunks)
+            all_metadata = list(all_metadata)
+        else:
+            st.error("❌ После фильтрации не осталось фрагментов")
+            st.stop()
+
+        results = advanced_search(query, all_chunks, all_metadata, model, top_k=12, min_similarity=0.5)
 
         if results:
-            st.success(f"✅ Найдено **{len(results)}** релевантных фрагментов")
-            
+            st.success(f"✅ Найдено **{len(results)}** точных фрагментов")
+
             # Показываем расширенный запрос
             expanded = expand_query(query)
             if expanded != query:
-                with st.expander("🔍 Расширенный запрос (синонимы)"):
-                    st.write(f"Было: **{query}**")
-                    st.write(f"Стало: **{expanded}**")
-            
+                with st.expander("🔍 Расширенный запрос"):
+                    st.write(f"**Было:** {query}")
+                    st.write(f"**Стало:** {expanded}")
+
             st.markdown("---")
 
             for i, r in enumerate(results, 1):
                 with st.container():
-                    col1, col2 = st.columns([4, 1.2])
+                    col1, col2 = st.columns([4, 1])
 
                     with col1:
                         st.markdown(f"**Результат {i}**")
-                        display = r['text'][:700] + "..." if len(r['text']) > 700 else r['text']
+                        display = r['text'][:600] + "..." if len(r['text']) > 600 else r['text']
                         st.write(display)
                         
-                        # Показываем совпавшие ключевые слова
-                        if r['matched_words']:
-                            st.caption(f"🔑 Совпавшие термины: {', '.join(list(r['matched_words'])[:5])}")
+                        if r['matched_terms']:
+                            st.caption(f"🔑 Найдены термины: {', '.join(list(r['matched_terms'])[:5])}")
 
                     with col2:
-                        st.metric("Сходство", f"{r['score']*100:.1f}%")
+                        st.metric("Точность", f"{r['score']*100:.1f}%")
                         st.caption(f"Смысл: {r['semantic']*100:.0f}%")
-                        st.caption(f"Слова: {r['keyword']*100:.0f}%")
-                        priority_label = "⭐" if r['priority'] > 0.7 else ""
-                        st.caption(f"Приоритет: {priority_label} {r['priority']*100:.0f}%")
+                        st.caption(f"Термины: {r['keyword']*100:.0f}%")
 
                     st.caption(f"📌 **Источник:** {r['metadata']['норматив']}")
                     st.divider()
 
-            # Экспорт
-            results_df = pd.DataFrame([
-                {
-                    'текст': r['text'][:300] + '...' if len(r['text']) > 300 else r['text'],
-                    'норматив': r['metadata']['норматив'],
-                    'сходство': f"{r['score']*100:.1f}%"
-                }
-                for r in results
-            ])
-
-            csv = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Скачать CSV",
-                data=csv,
-                file_name=f"поиск_{query[:20].replace(' ', '_')}.csv",
-                mime="text/csv"
-            )
-
         else:
             st.warning(f"😕 Ничего не найдено по запросу: **{query}**")
-            st.info("💡 Совет: попробуйте использовать термины из нормативов: 'автоматический выключатель' вместо 'автомат'")
-
-# --- Инструкция ---
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("### 📈 Советы для точного поиска")
-    st.markdown("""
-    - **Используйте термины из нормативов**  
-      ✅ «автоматический выключатель»  
-      ❌ «автомат»
-    - **Указывайте номер пункта**  
-      ✅ «п. 1.7.126 заземление»
-    - **Добавляйте норматив**  
-      ✅ «ПУЭ сечение проводника»
-    - **Не используйте стоп-слова**  
-      («что», «как», «где», «почему»)
-    """)
+            st.info("💡 Совет: попробуйте конкретный термин, например 'сечение заземлителя ПУЭ'")
