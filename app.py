@@ -5,8 +5,10 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import striprtf
 import re
+import tempfile
+from pyth.plugins.rtf15.reader import Rtf15Reader
+from pyth.plugins.plaintext.writer import PlaintextWriter
 
 # Настройка страницы
 st.set_page_config(page_title="Смысловой поиск по нормативам", layout="wide")
@@ -20,16 +22,27 @@ def load_model():
 
 model = load_model()
 
-# Функция для извлечения текста из RTF
+# Функция для извлечения текста из RTF с помощью pyth
 def extract_text_from_rtf(rtf_path):
     try:
-        with open(rtf_path, 'r', encoding='utf-8', errors='ignore') as f:
-            rtf_content = f.read()
-        text = striprtf.rtf_to_text(rtf_content)
+        # Читаем RTF-файл
+        with open(rtf_path, 'rb') as f:
+            doc = Rtf15Reader.read(f)
+        
+        # Извлекаем текст через PlaintextWriter
+        text = PlaintextWriter.write(doc).getvalue()
+        
+        # Декодируем и чистим
+        if isinstance(text, bytes):
+            text = text.decode('utf-8', errors='ignore')
+        elif isinstance(text, str):
+            text = text
+        
+        # Удаляем лишние пробелы и переносы
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     except Exception as e:
-        st.error(f"Ошибка при чтении {rtf_path}: {e}")
+        st.error(f"Ошибка при чтении {rtf_path.name}: {e}")
         return ""
 
 # Функция для разбивки текста на чанки
@@ -81,6 +94,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.caption("💡 Чтобы добавить новый норматив, загрузите RTF-файл в папку 'docs' на GitHub")
+    st.caption("⚙️ Используется библиотека pyth для чтения RTF")
 
 # Поисковый запрос
 query = st.text_input("✏️ Введите запрос:", placeholder="например: сечение проводников заземления")

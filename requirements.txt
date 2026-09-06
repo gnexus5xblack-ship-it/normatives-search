@@ -2,5 +2,5 @@ streamlit
 sentence-transformers
 scikit-learn
 pandas
-striprtf
 numpy
+pyth
