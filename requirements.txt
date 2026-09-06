@@ -3,4 +3,3 @@ sentence-transformers
 scikit-learn
 pandas
 numpy
-textract

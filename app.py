@@ -6,7 +6,6 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import re
-import textract
 
 # Настройка страницы
 st.set_page_config(page_title="Смысловой поиск по нормативам", layout="wide")
@@ -21,17 +20,22 @@ def load_model():
 
 model = load_model()
 
-# Функция для извлечения текста из RTF через textract
-def extract_text_from_rtf(rtf_path):
+# Функция для извлечения текста из TXT
+def extract_text_from_txt(txt_path):
     try:
-        # textract умеет читать RTF напрямую
-        text = textract.process(str(rtf_path)).decode('utf-8', errors='ignore')
-        
-        # Удаляем лишние пробелы и переносы строк
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
+        # Пробуем разные кодировки (для русских букв)
+        for encoding in ['utf-8', 'windows-1251', 'cp1251', 'koi8-r']:
+            try:
+                with open(txt_path, 'r', encoding=encoding) as f:
+                    text = f.read()
+                # Удаляем лишние пробелы и переносы
+                text = re.sub(r'\s+', ' ', text).strip()
+                return text
+            except UnicodeDecodeError:
+                continue
+        return ""
     except Exception as e:
-        st.error(f"⚠️ Ошибка при чтении {rtf_path.name}: {e}")
+        st.error(f"⚠️ Ошибка при чтении {txt_path.name}: {e}")
         return ""
 
 # Функция для разбивки текста на фрагменты (чанки)
@@ -84,39 +88,40 @@ docs_folder = Path("./docs")
 # Проверяем наличие папки docs
 if not docs_folder.exists():
     st.error("❌ Папка 'docs' не найдена!")
-    st.info("📖 Создайте папку 'docs' в репозитории и добавьте RTF-файлы с нормативами.")
+    st.info("📖 Создайте папку 'docs' в репозитории и добавьте TXT-файлы с нормативами.")
     st.stop()
 
-# Получаем список RTF-файлов
-rtf_files = list(docs_folder.glob("*.rtf"))
+# Получаем список TXT-файлов
+txt_files = list(docs_folder.glob("*.txt"))
 
-if not rtf_files:
-    st.warning("📁 В папке 'docs' нет RTF-файлов")
-    st.info("📤 Загрузите RTF-файлы через GitHub в папку 'docs' и обновите страницу.")
+if not txt_files:
+    st.warning("📁 В папке 'docs' нет TXT-файлов")
+    st.info("📤 Загрузите TXT-файлы через GitHub в папку 'docs' и обновите страницу.")
     
     # Инструкция
     with st.expander("📖 Как добавить нормативы"):
         st.markdown("""
-        1. Зайдите на **GitHub** в ваш репозиторий
-        2. Нажмите **'Add file' → 'Upload files'**
-        3. Выберите папку **'docs'**
-        4. Перетащите RTF-файлы с нормативами
-        5. Нажмите **'Commit changes'**
-        6. Обновите эту страницу
+        1. Конвертируйте RTF-файлы в TXT через WordPad
+        2. Зайдите на **GitHub** в ваш репозиторий
+        3. Нажмите **'Add file' → 'Upload files'**
+        4. Выберите папку **'docs'**
+        5. Перетащите TXT-файлы с нормативами
+        6. Нажмите **'Commit changes'**
+        7. Обновите эту страницу
         """)
     st.stop()
 
 # Отображаем список загруженных файлов
 with st.sidebar:
-    st.write(f"📄 Всего нормативов: **{len(rtf_files)}**")
+    st.write(f"📄 Всего нормативов: **{len(txt_files)}**")
     st.markdown("**Файлы:**")
-    for f in rtf_files:
+    for f in txt_files:
         file_size = f.stat().st_size // 1024  # размер в КБ
         st.write(f"   - {f.name} ({file_size} КБ)")
     
     st.markdown("---")
-    st.caption("💡 Чтобы добавить новый норматив, загрузите RTF-файл в папку 'docs' на GitHub")
-    st.caption("⚙️ Используется библиотека textract для чтения RTF")
+    st.caption("💡 Чтобы добавить новый норматив, загрузите TXT-файл в папку 'docs' на GitHub")
+    st.caption("⚙️ Используется формат TXT (самый надежный)")
 
 # Поле для поискового запроса
 st.markdown("### ✏️ Введите ваш запрос")
@@ -137,7 +142,7 @@ if search_button and query:
         st.warning("⚠️ Введите минимум 3 символа для поиска")
         st.stop()
     
-    with st.spinner(f"🧠 Обрабатываю {len(rtf_files)} нормативов..."):
+    with st.spinner(f"🧠 Обрабатываю {len(txt_files)} нормативов..."):
         all_chunks = []
         all_metadata = []
         failed_files = []
@@ -146,13 +151,13 @@ if search_button and query:
         progress_bar = st.progress(0)
         
         # Обрабатываем каждый файл
-        for idx, rtf_file in enumerate(rtf_files):
-            progress_bar.progress((idx + 1) / len(rtf_files))
+        for idx, txt_file in enumerate(txt_files):
+            progress_bar.progress((idx + 1) / len(txt_files))
             
             # Извлекаем текст
-            text = extract_text_from_rtf(rtf_file)
+            text = extract_text_from_txt(txt_file)
             if not text:
-                failed_files.append(rtf_file.name)
+                failed_files.append(txt_file.name)
                 continue
             
             # Разбиваем на чанки
@@ -162,8 +167,8 @@ if search_button and query:
             for chunk in chunks:
                 all_chunks.append(chunk)
                 all_metadata.append({
-                    'норматив': rtf_file.stem,
-                    'файл': rtf_file.name
+                    'норматив': txt_file.stem,
+                    'файл': txt_file.name
                 })
         
         progress_bar.empty()
@@ -174,8 +179,7 @@ if search_button and query:
         
         # Если нет текста для поиска
         if not all_chunks:
-            st.error("❌ Не удалось извлечь текст из файлов. Проверьте формат RTF.")
-            st.info("💡 Совет: попробуйте сохранить файлы как 'RTF' через Microsoft Word или WordPad")
+            st.error("❌ Не удалось извлечь текст из файлов. Проверьте формат TXT.")
             st.stop()
         
         # Выполняем семантический поиск
@@ -234,11 +238,12 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📖 Как это работает")
     st.markdown("""
-    1. Загрузите RTF-файлы с нормативами в папку `docs`
-    2. Введите запрос на русском языке
-    3. Приложение находит фрагменты по **смыслу**, а не по словам
-    4. Результаты показывают процент сходства с запросом
-    5. Можно скачать результаты в CSV
+    1. Конвертируйте RTF в TXT через WordPad
+    2. Загрузите TXT-файлы в папку `docs` на GitHub
+    3. Введите запрос на русском языке
+    4. Приложение находит фрагменты по **смыслу**, а не по словам
+    5. Результаты показывают процент сходства с запросом
+    6. Можно скачать результаты в CSV
     """)
     
     st.markdown("---")
