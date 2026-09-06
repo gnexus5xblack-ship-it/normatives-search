@@ -2,252 +2,230 @@ import streamlit as st
 import os
 from pathlib import Path
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import re
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
 
-# Настройка страницы
+# --- Настройка страницы ---
 st.set_page_config(page_title="Смысловой поиск по нормативам", layout="wide")
-st.title("🧠 Смысловой поиск по нормативной документации")
-st.markdown("**Ищет по смыслу, а не по точным словам**")
+st.title("🧠 Точный поиск по нормативной документации")
+st.markdown("**Ищет по смыслу + ключевым словам (гибридный поиск)**")
 st.markdown("---")
 
-# Загружаем модель (многозычная, оптимизирована для русского)
+# --- Загрузка модели (улучшенная) ---
 @st.cache_resource
 def load_model():
-    # Используем модель, специально обученную на русском языке
-    return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    # Модель, специально обученная на технических/научных текстах
+    return SentenceTransformer('sentence-transformers/allenai-specter')
 
 model = load_model()
 
-# Функция для извлечения текста из TXT
+# --- Очистка текста от мусора ---
+def clean_text(text):
+    # Удаляем номера страниц, оглавления, повторы
+    text = re.sub(r'Стр\.\s*\d+', '', text)
+    text = re.sub(r'Страница\s*\d+', '', text)
+    text = re.sub(r'\d+\s*из\s*\d+', '', text)
+    text = re.sub(r'[\\/*?:"<>|]', ' ', text)
+    # Удаляем лишние пробелы
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# --- Извлечение текста из TXT (с очисткой) ---
 def extract_text_from_txt(txt_path):
     try:
-        # Пробуем разные кодировки
         for encoding in ['utf-8', 'windows-1251', 'cp1251', 'koi8-r']:
             try:
                 with open(txt_path, 'r', encoding=encoding) as f:
                     text = f.read()
-                # Удаляем лишние пробелы и переносы
-                text = re.sub(r'\s+', ' ', text).strip()
+                text = clean_text(text)
                 return text
             except UnicodeDecodeError:
                 continue
         return ""
-    except Exception as e:
+    except Exception:
         return ""
 
-# Функция для умной разбивки текста на фрагменты
-def split_into_chunks(text, chunk_size=300, overlap=50):
-    """
-    Разбивает текст на перекрывающиеся фрагменты.
-    chunk_size - размер фрагмента в словах
-    overlap - перекрытие между фрагментами
-    """
-    words = text.split()
-    if not words:
-        return []
+# --- Умная разбивка на фрагменты по предложениям ---
+def split_by_sentences(text, max_len=350, overlap=50):
+    # Разбиваем по точкам, вопросам, восклицаниям
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     
     chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = ' '.join(words[i:i + chunk_size])
-        if chunk:
-            chunks.append(chunk)
+    current_chunk = []
+    current_len = 0
+    
+    for sent in sentences:
+        sent_len = len(sent.split())
+        if current_len + sent_len > max_len and current_chunk:
+            chunks.append(' '.join(current_chunk))
+            # Перекрытие: оставляем последние overlap слов
+            overlap_words = ' '.join(current_chunk).split()[-overlap:] if overlap > 0 else []
+            current_chunk = overlap_words + [sent]
+            current_len = len(overlap_words) + sent_len
+        else:
+            current_chunk.append(sent)
+            current_len += sent_len
+    
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    
     return chunks
 
-# Функция для семантического поиска с улучшенной фильтрацией
-def search_semantic(query, chunks, chunk_metadata, model, top_k=15, min_similarity=0.4):
+# --- Гибридный поиск (смысл + ключевые слова) ---
+def hybrid_search(query, chunks, chunk_metadata, model, top_k=20, min_similarity=0.35, keyword_weight=0.25):
     if not chunks:
         return []
     
-    # Создаем эмбеддинг для запроса
-    query_embedding = model.encode([query])
+    # 1. Смысловой поиск
+    query_emb = model.encode([query])
+    chunk_embs = model.encode(chunks)
+    semantic_scores = cosine_similarity(query_emb, chunk_embs)[0]
     
-    # Создаем эмбеддинги для всех фрагментов
-    chunk_embeddings = model.encode(chunks)
+    # 2. Ключевые слова (TF-IDF)
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english', max_features=100)
+        tfidf_matrix = vectorizer.fit_transform(chunks + [query])
+        # Сходство по ключевым словам
+        keyword_scores = cosine_similarity(tfidf_matrix[-1:], tfidf_matrix[:-1])[0]
+    except:
+        keyword_scores = np.zeros(len(chunks))
     
-    # Вычисляем косинусное сходство
-    similarities = cosine_similarity(query_embedding, chunk_embeddings)[0]
+    # 3. Комбинированный рейтинг
+    combined_scores = (1 - keyword_weight) * semantic_scores + keyword_weight * keyword_scores
     
-    # Получаем индексы топ-k наиболее похожих фрагментов
-    top_indices = np.argsort(similarities)[::-1][:top_k]
+    # 4. Сортировка
+    top_indices = np.argsort(combined_scores)[::-1][:top_k]
     
-    # Формируем результаты с порогом схожести
     results = []
     for i in top_indices:
-        if similarities[i] >= min_similarity:
-            results.append((chunks[i], chunk_metadata[i], similarities[i]))
+        if combined_scores[i] >= min_similarity:
+            results.append((chunks[i], chunk_metadata[i], combined_scores[i], semantic_scores[i], keyword_scores[i]))
     
     return results
 
-# --- Интерфейс приложения ---
+# --- Интерфейс ---
 
-# Боковая панель с информацией
 st.sidebar.header("📚 Библиотека нормативов")
 
-# Путь к папке с документами
 docs_folder = Path("./docs")
 
-# Проверяем наличие папки docs
 if not docs_folder.exists():
     st.error("❌ Папка 'docs' не найдена!")
-    st.info("📖 Создайте папку 'docs' в репозитории и добавьте TXT-файлы с нормативами.")
     st.stop()
 
-# Получаем список TXT-файлов (исключаем placeholder)
+# Исключаем служебные файлы
 txt_files = [f for f in docs_folder.glob("*.txt") if "placeholder" not in f.name.lower()]
 
 if not txt_files:
-    st.warning("📁 В папке 'docs' нет TXT-файлов с нормативами")
-    st.info("📤 Загрузите TXT-файлы через GitHub в папку 'docs' и обновите страницу.")
-    
-    with st.expander("📖 Как добавить нормативы"):
-        st.markdown("""
-        1. Конвертируйте RTF-файлы в TXT через WordPad
-        2. Зайдите на **GitHub** в ваш репозиторий
-        3. Нажмите **'Add file' → 'Upload files'**
-        4. Выберите папку **'docs'**
-        5. Перетащите TXT-файлы с нормативами
-        6. Нажмите **'Commit changes'**
-        7. Обновите эту страницу
-        """)
+    st.warning("📁 В папке 'docs' нет TXT-файлов")
     st.stop()
 
-# Отображаем список загруженных файлов
 with st.sidebar:
     st.write(f"📄 Всего нормативов: **{len(txt_files)}**")
-    st.markdown("**Файлы:**")
     for f in txt_files:
-        file_size = f.stat().st_size // 1024
-        st.write(f"   - {f.name} ({file_size} КБ)")
-    
-    st.markdown("---")
-    st.caption("💡 Используется улучшенная модель для русского языка")
-    st.caption("⚙️ Минимальное сходство: 40%")
+        st.write(f"   - {f.name}")
 
-# Поле для поискового запроса
-st.markdown("### ✏️ Введите ваш запрос")
+    st.markdown("---")
+    st.caption("🧠 Модель: allenai-specter (технические тексты)")
+    st.caption("⚙️ Гибридный поиск: смысл + ключевые слова")
+    st.caption("🎯 Порог сходства: 35%")
+
+# --- Ввод запроса ---
 query = st.text_input(
-    "Поисковый запрос:",
+    "✏️ Введите запрос:",
     placeholder="например: время срабатывания автоматических выключателей",
     label_visibility="collapsed"
 )
 
-# Кнопка поиска
-col1, col2, col3 = st.columns([1, 1, 4])
-with col1:
-    search_button = st.button("🔎 Искать по смыслу", type="primary", use_container_width=True)
-
-# Обработка поиска
-if search_button and query:
+# --- Кнопка поиска ---
+if st.button("🔎 Искать", type="primary") and query:
     if len(query) < 3:
-        st.warning("⚠️ Введите минимум 3 символа для поиска")
+        st.warning("⚠️ Минимум 3 символа")
         st.stop()
-    
-    with st.spinner(f"🧠 Обрабатываю {len(txt_files)} нормативов..."):
+
+    with st.spinner(f"Обрабатываю {len(txt_files)} файлов..."):
         all_chunks = []
         all_metadata = []
-        failed_files = []
-        
-        # Прогресс-бар
-        progress_bar = st.progress(0)
-        
-        # Обрабатываем каждый файл
+
+        progress = st.progress(0)
         for idx, txt_file in enumerate(txt_files):
-            progress_bar.progress((idx + 1) / len(txt_files))
-            
-            # Извлекаем текст
+            progress.progress((idx + 1) / len(txt_files))
+
             text = extract_text_from_txt(txt_file)
             if not text:
-                failed_files.append(txt_file.name)
                 continue
-            
-            # Разбиваем на умные фрагменты
-            chunks = split_into_chunks(text, chunk_size=300, overlap=50)
-            
-            # Сохраняем с метаданными
+
+            chunks = split_by_sentences(text, max_len=350, overlap=50)
+
             for chunk in chunks:
                 all_chunks.append(chunk)
                 all_metadata.append({
                     'норматив': txt_file.stem.replace('.txt', '').replace('_', ' '),
                     'файл': txt_file.name
                 })
-        
-        progress_bar.empty()
-        
-        # Если не удалось извлечь текст
-        if failed_files:
-            st.warning(f"⚠️ Не удалось прочитать {len(failed_files)} файлов")
-        
-        # Если нет текста для поиска
+
+        progress.empty()
+
         if not all_chunks:
-            st.error("❌ Не удалось извлечь текст из файлов. Проверьте формат TXT.")
+            st.error("❌ Не удалось извлечь текст")
             st.stop()
-        
-        # Выполняем семантический поиск
-        results = search_semantic(query, all_chunks, all_metadata, model, top_k=15, min_similarity=0.4)
-        
-        # Вывод результатов
+
+        results = hybrid_search(query, all_chunks, all_metadata, model, top_k=20, min_similarity=0.35)
+
         if results:
             st.success(f"✅ Найдено **{len(results)}** релевантных фрагментов")
             st.markdown("---")
-            
-            # Показываем результаты
-            for i, (chunk, meta, score) in enumerate(results, 1):
+
+            for i, (chunk, meta, combined, semantic, keyword) in enumerate(results, 1):
                 with st.container():
-                    col1, col2 = st.columns([4, 1])
+                    col1, col2 = st.columns([4, 1.2])
+
                     with col1:
                         st.markdown(f"**Результат {i}**")
-                        # Показываем фрагмент с контекстом
-                        display_text = chunk
-                        if len(display_text) > 600:
-                            display_text = display_text[:600] + "..."
-                        st.write(display_text)
+                        display = chunk[:700] + "..." if len(chunk) > 700 else chunk
+                        st.write(display)
+
                     with col2:
-                        score_percent = f"{score * 100:.1f}%"
-                        st.metric("Сходство", score_percent)
-                    
-                    # Информация об источнике
+                        st.metric("Сходство", f"{combined*100:.1f}%")
+                        st.caption(f"Смысл: {semantic*100:.0f}%")
+                        st.caption(f"Слова: {keyword*100:.0f}%")
+
                     st.caption(f"📌 **Источник:** {meta['норматив']}")
                     st.divider()
-            
-            # Кнопка для скачивания результатов в CSV
+
+            # Экспорт
             results_df = pd.DataFrame([
                 {
                     'текст': r[0][:300] + '...' if len(r[0]) > 300 else r[0],
                     'норматив': r[1]['норматив'],
-                    'файл': r[1]['файл'],
                     'сходство': f"{r[2]*100:.1f}%"
                 }
                 for r in results
             ])
-            
+
             csv = results_df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Скачать результаты в CSV",
+                label="📥 Скачать CSV",
                 data=csv,
-                file_name=f"результаты_поиска_{query[:20].replace(' ', '_')}.csv",
+                file_name=f"поиск_{query[:20].replace(' ', '_')}.csv",
                 mime="text/csv"
             )
+
         else:
-            st.warning(f"😕 Ничего не найдено по запросу **'{query}'**")
-            st.info("💡 Совет: попробуйте использовать более общие термины или проверьте, есть ли в нормативах нужная информация")
+            st.warning(f"😕 Ничего не найдено по запросу: **{query}**")
 
-elif search_button and not query:
-    st.warning("⚠️ Введите поисковый запрос")
-
-# Информация в боковой панели
+# --- Инструкция ---
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### 📖 Как улучшить точность поиска")
+    st.markdown("### 📈 Как повысить точность")
     st.markdown("""
-    1. **Используйте конкретные термины** (например, 'время срабатывания автоматического выключателя')
-    2. **Проверьте качество TXT** — если в файле много мусора, пересохраните через Word
-    3. **Добавьте больше нормативов** — чем больше данных, тем точнее поиск
-    4. **Удалите служебные файлы** (placeholder.txt) из папки docs
+    - **Формулируйте запрос конкретно**  
+      ✅ «время срабатывания автоматического выключателя при перегрузке»  
+      ❌ «автомат»
+    - **Используйте термины из нормативов**
+    - **Проверьте качество TXT** (не должно быть мусора)
+    - **Добавьте больше файлов** — модель лучше ищет по большему объёму
     """)
-    
-    st.markdown("---")
-    st.caption("🔒 Данные хранятся только в вашем репозитории GitHub")
-    st.caption("🧠 Модель: paraphrase-multilingual-MiniLM-L12-v2")
