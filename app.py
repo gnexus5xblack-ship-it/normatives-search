@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import shutil
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -9,6 +10,13 @@ import hashlib
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
+
+# --- АВТОМАТИЧЕСКАЯ ОЧИСТКА КЭША ---
+CACHE_DIR = Path("./cache")
+if CACHE_DIR.exists():
+    shutil.rmtree(CACHE_DIR)
+    print("✅ Кэш очищен")
+CACHE_DIR.mkdir(exist_ok=True)
 
 # --- Настройка ---
 st.set_page_config(page_title="Точный поиск по нормативам", layout="wide")
@@ -28,15 +36,15 @@ SYNONYMS = {
     'УЗО': ['устройство защитного отключения'],
 }
 
-# --- Стоп-слова (полный список) ---
+# --- Стоп-слова ---
 STOP_WORDS = set([
     'и', 'в', 'на', 'с', 'по', 'к', 'у', 'о', 'от', 'до', 'из', 'за', 'через',
     'при', 'для', 'без', 'под', 'над', 'об', 'про', 'же', 'бы', 'да', 'нет',
     'так', 'как', 'что', 'это', 'все', 'всё', 'или', 'если', 'то', 'но', 'а',
     'его', 'её', 'ее', 'их', 'еще', 'уже', 'ведь', 'вот', 'лишь', 'очень',
-    'можно', 'нужно', 'должен', 'должна', 'должны', 'быть',
-    'более', 'менее', 'также', 'кроме', 'который', 'которая', 'которое',
-    'этом', 'этом', 'этим', 'этой', 'этого', 'этих', 'этим',
+    'можно', 'нужно', 'должен', 'должна', 'должны', 'быть', 'более', 'менее',
+    'также', 'кроме', 'который', 'которая', 'которое', 'этом', 'этим', 'этой',
+    'этого', 'этих', 'этим'
 ])
 
 # --- Загрузка модели ---
@@ -47,9 +55,6 @@ def load_model():
 model = load_model()
 
 # --- Кэш эмбеддингов ---
-CACHE_DIR = Path("./cache")
-CACHE_DIR.mkdir(exist_ok=True)
-
 def get_cache_key(text):
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
@@ -68,7 +73,6 @@ def expand_query(query):
     words = re.findall(r'[а-яa-z0-9]{3,}', query.lower())
     expanded = [query]
     
-    # Синонимы
     for word in words:
         if word in SYNONYMS:
             for syn in SYNONYMS[word]:
@@ -100,12 +104,9 @@ def extract_text_from_txt(txt_path):
     except Exception:
         return ""
 
-# --- Разбивка на короткие точные фрагменты ---
+# --- Разбивка на фрагменты ---
 def split_by_sentences(text, max_len=200, overlap=30):
-    """Разбивает на маленькие фрагменты для точности"""
-    # Разбиваем по предложениям
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    
     chunks = []
     current = []
     current_len = 0
@@ -114,7 +115,6 @@ def split_by_sentences(text, max_len=200, overlap=30):
         sent_len = len(sent.split())
         if current_len + sent_len > max_len and current:
             chunks.append(' '.join(current))
-            # Перекрытие только 30 слов
             overlap_words = ' '.join(current).split()[-overlap:] if overlap > 0 else []
             current = overlap_words + [sent]
             current_len = len(overlap_words) + sent_len
@@ -127,53 +127,60 @@ def split_by_sentences(text, max_len=200, overlap=30):
     
     return chunks
 
-# --- Фильтрация фрагментов (отсекаем мусор) ---
+# --- Фильтрация фрагментов ---
 def filter_chunks(chunks, metadata):
-    """Удаляет слишком короткие, слишком длинные, служебные фрагменты"""
     filtered = []
     for chunk, meta in zip(chunks, metadata):
         words = chunk.split()
         word_count = len(words)
         
-        # Минимум 10 слов, максимум 250
         if word_count < 10 or word_count > 250:
             continue
         
-        # Удаляем фрагменты с подозрительными маркерами
         if 'таблица' in chunk.lower() and len(words) < 15:
             continue
         
-        # Удаляем фрагменты с большим количеством цифр (оглавления)
-        digit_ratio = len(re.findall(r'\d', chunk)) / len(chunk)
-        if digit_ratio > 0.2:  # больше 20% цифр
+        digit_ratio = len(re.findall(r'\d', chunk)) / max(len(chunk), 1)
+        if digit_ratio > 0.2:
             continue
         
         filtered.append((chunk, meta))
     
     return filtered
 
-# --- Основной поиск (с жёсткой фильтрацией) ---
-def advanced_search(query, chunks, chunk_metadata, model, top_k=15, min_similarity=0.5):
+# --- Основной поиск ---
+def advanced_search(query, chunks, chunk_metadata, model, top_k=12, min_similarity=0.5):
     if not chunks:
         return []
     
-    # 1. Расширяем запрос
     expanded_query = expand_query(query)
     
-    # 2. Смысловой поиск
+    # Получаем эмбеддинги
     query_emb = get_embedding(expanded_query)
-    chunk_embs = np.array([get_embedding(c)[0] for c in chunks])
+    
+    # Обрабатываем чанки по одному, чтобы избежать ошибок памяти
+    chunk_embs = []
+    for c in chunks:
+        try:
+            emb = get_embedding(c)[0]
+            chunk_embs.append(emb)
+        except Exception as e:
+            st.warning(f"Ошибка при обработке фрагмента: {e}")
+            continue
+    
+    if not chunk_embs:
+        return []
+    
+    chunk_embs = np.array(chunk_embs)
     semantic_scores = cosine_similarity(query_emb, chunk_embs)[0]
     
-    # 3. Ключевые слова (строгий поиск терминов)
-    # Извлекаем ключевые термины из запроса
+    # Ключевые слова
     query_terms = set(re.findall(r'[а-яa-z]{4,}', query.lower()))
     query_terms = query_terms - STOP_WORDS
     
     keyword_scores = []
     for chunk in chunks:
         chunk_words = set(re.findall(r'[а-яa-z]{4,}', chunk.lower()))
-        # Считаем пересечение ключевых терминов
         overlap = len(query_terms & chunk_words)
         if query_terms:
             keyword_scores.append(overlap / len(query_terms))
@@ -181,13 +188,10 @@ def advanced_search(query, chunks, chunk_metadata, model, top_k=15, min_similari
             keyword_scores.append(0)
     keyword_scores = np.array(keyword_scores)
     
-    # 4. Комбинированный рейтинг (смещение в сторону ключевых слов)
+    # Комбинированный рейтинг
     combined = 0.4 * semantic_scores + 0.6 * keyword_scores
     
-    # 5. Фильтр по количеству совпавших терминов
-    min_term_matches = max(1, len(query_terms) // 2)
-    
-    # 6. Сортировка и фильтрация
+    # Сортировка
     top_indices = np.argsort(combined)[::-1]
     
     results = []
@@ -195,13 +199,11 @@ def advanced_search(query, chunks, chunk_metadata, model, top_k=15, min_similari
         if len(results) >= top_k:
             break
         
-        # Проверяем порог сходства
         if combined[i] < min_similarity:
             continue
         
-        # Проверяем, что есть хотя бы один ключевой термин
         chunk_words = set(re.findall(r'[а-яa-z]{4,}', chunks[i].lower()))
-        if not (query_terms & chunk_words):
+        if query_terms and not (query_terms & chunk_words):
             continue
         
         results.append({
@@ -242,12 +244,11 @@ with st.sidebar:
     st.caption("🎯 Порог сходства: **50%**")
     st.caption("📏 Фрагменты: **до 200 слов**")
     st.caption("🔑 Приоритет: **ключевые термины**")
-    st.caption("🚫 Фильтрация: удаляет короткие/длинные/цифровые фрагменты")
 
 # --- Ввод запроса ---
 query = st.text_input(
     "✏️ Введите запрос:",
-    placeholder="например: сечение заземляющего проводника по ПУЭ",
+    placeholder="например: сечение заземляющего проводника минимальное",
     label_visibility="collapsed"
 )
 
@@ -299,7 +300,6 @@ if st.button("🔎 Искать", type="primary") and query:
         if results:
             st.success(f"✅ Найдено **{len(results)}** точных фрагментов")
 
-            # Показываем расширенный запрос
             expanded = expand_query(query)
             if expanded != query:
                 with st.expander("🔍 Расширенный запрос"):
